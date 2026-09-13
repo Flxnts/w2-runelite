@@ -2,7 +2,7 @@
 
 W2 is a RuneLite Grand Exchange plugin for OSRS players who flip and merch.
 
-It focuses on useful live market information without turning the sidebar into a dashboard.
+It provides live market information, flip discovery and automatic local trade tracking directly inside RuneLite.
 
 ## Features
 
@@ -11,34 +11,33 @@ It focuses on useful live market information without turning the sidebar into a 
 - Post-tax profit and ROI
 - Recent 5-minute market activity
 - Liquidity and stale-price warnings
-- Fast item lookup and autocomplete
+- Fast item lookup
 - Local watchlist
-- Automatic Grand Exchange trade detection
+- Automatic Grand Exchange buy and sell detection
 - Open-position tracking
 - Realised profit after GE tax
 - Per-account local trade history
 
 ## Market data
 
-W2 requests public Grand Exchange price and volume data from the OSRS Wiki Prices API.
+W2 uses public Grand Exchange market data from the OSRS Wiki Prices API.
 
-Trade history, watchlists and W2 settings are stored locally through RuneLite configuration. W2 does not upload your Grand Exchange trade history to w2.gg.
+## Trade tracking
+
+Grand Exchange fills are detected automatically through RuneLite. W2 uses these fills to track open positions and calculate realised profit after Grand Exchange tax.
+
+Trade history is stored locally through RuneLite configuration and is not uploaded to w2.gg.
 
 ## W2.gg
 
-More Grand Exchange tools are available at:
-
-https://w2.gg
+W2 also has a web version with additional Grand Exchange tools at w2.gg.
 
 ## Privacy
 
-W2 communicates with the OSRS Wiki Prices API to request public item market data.
+W2 communicates with the OSRS Wiki Prices API to retrieve public Grand Exchange market data.
 
-The requests contain item/market lookup information required to retrieve prices. W2 does not send your RuneScape account credentials or locally recorded Grand Exchange trade history to the OSRS Wiki API or w2.gg.
+W2 does not send your RuneScape account credentials or locally recorded Grand Exchange trade history to the OSRS Wiki API or w2.gg.
 
-## Development
+## Licence
 
-Build:
-
-```powershell
-.\gradlew.bat clean build
+W2 is released under the BSD 2-Clause License.
