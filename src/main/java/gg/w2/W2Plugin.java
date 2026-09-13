@@ -1,28 +1,56 @@
 package gg.w2;
 
 import com.google.inject.Provides;
+import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.util.logging.Logger;
 import javax.inject.Inject;
-import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 
-@Slf4j
 @PluginDescriptor(
 		name = "W2",
-		description = "Grand Exchange tools for Old School RuneScape"
+		description = "Grand Exchange flips, live OSRS Wiki prices and local trade tracking",
+		tags = {"grand exchange", "ge", "flipping", "merching", "prices", "trades"}
 )
 public class W2Plugin extends Plugin
 {
+	private static final Logger LOGGER =
+			Logger.getLogger(W2Plugin.class.getName());
+
+	@Inject
+	private Client client;
+
 	@Inject
 	private ClientToolbar clientToolbar;
+
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
+	private W2PriceService priceService;
+
+	@Inject
+	private W2WatchlistService watchlistService;
+
+	@Inject
+	private W2BankService bankService;
+
+	@Inject
+	private W2TradeService tradeService;
 
 	private W2Panel panel;
 	private NavigationButton navigationButton;
@@ -30,18 +58,30 @@ public class W2Plugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		panel = new W2Panel();
+		tradeService.bootstrap(client.getGrandExchangeOffers());
 
-		navigationButton = NavigationButton.builder()
-				.tooltip("W2")
-				.icon(createTemporaryIcon())
-				.priority(7)
-				.panel(panel)
-				.build();
+		panel =
+				new W2Panel(
+						itemManager,
+						priceService,
+						watchlistService,
+						bankService,
+						tradeService
+				);
 
-		clientToolbar.addNavigation(navigationButton);
+		navigationButton =
+				NavigationButton.builder()
+						.tooltip("W2")
+						.icon(createIcon())
+						.priority(7)
+						.panel(panel)
+						.build();
 
-		log.debug("W2 started");
+		clientToolbar.addNavigation(
+				navigationButton
+		);
+
+		LOGGER.fine("W2 started");
 	}
 
 	@Override
@@ -49,36 +89,133 @@ public class W2Plugin extends Plugin
 	{
 		if (navigationButton != null)
 		{
-			clientToolbar.removeNavigation(navigationButton);
+			clientToolbar.removeNavigation(
+					navigationButton
+			);
 		}
 
 		navigationButton = null;
 		panel = null;
 
-		log.debug("W2 stopped");
+		LOGGER.fine("W2 stopped");
 	}
 
-	private BufferedImage createTemporaryIcon()
+	@Subscribe
+	public void onGrandExchangeOfferChanged(
+			GrandExchangeOfferChanged event)
 	{
-		BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
-		Graphics2D graphics = image.createGraphics();
+		GrandExchangeOffer offer = event.getOffer();
 
-		graphics.setRenderingHint(
+		if (offer == null)
+		{
+			return;
+		}
+
+		/*
+		 * RuneLite clears offers while transitioning away from a logged-in
+		 * session. Ignore those EMPTY events so W2 does not mistake a hop or
+		 * logout for a trade update.
+		 */
+		if (offer.getState() == GrandExchangeOfferState.EMPTY
+				&& client.getGameState() != net.runelite.api.GameState.LOGGED_IN)
+		{
+			return;
+		}
+
+		tradeService.onOfferChanged(
+				event.getSlot(),
+				offer
+		);
+
+		if (panel != null)
+		{
+			panel.refreshTrades();
+		}
+	}
+
+	private BufferedImage createIcon()
+	{
+		BufferedImage image =
+				new BufferedImage(
+						16,
+						16,
+						BufferedImage.TYPE_INT_ARGB
+				);
+
+		Graphics2D g =
+				image.createGraphics();
+
+		g.setRenderingHint(
+				RenderingHints.KEY_ANTIALIASING,
+				RenderingHints.VALUE_ANTIALIAS_ON
+		);
+
+		g.setRenderingHint(
 				RenderingHints.KEY_TEXT_ANTIALIASING,
 				RenderingHints.VALUE_TEXT_ANTIALIAS_ON
 		);
 
-		graphics.setColor(new Color(220, 220, 220));
-		graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 9));
-		graphics.drawString("W2", 1, 11);
-		graphics.dispose();
+		Color gold =
+				new Color(
+						205,
+						173,
+						92
+				);
+
+		g.setColor(
+				new Color(
+						25,
+						25,
+						25,
+						240
+				)
+		);
+
+		g.fillOval(
+				1,
+				1,
+				13,
+				13
+		);
+
+		g.setStroke(
+				new BasicStroke(1.4f)
+		);
+
+		g.setColor(gold);
+
+		g.drawOval(
+				1,
+				1,
+				13,
+				13
+		);
+
+		g.setFont(
+				new Font(
+						"SansSerif",
+						Font.BOLD,
+						7
+				)
+		);
+
+		g.drawString(
+				"w2",
+				3,
+				10
+		);
+
+		g.dispose();
 
 		return image;
 	}
 
 	@Provides
-	W2Config provideConfig(ConfigManager configManager)
+	W2Config provideConfig(
+			ConfigManager configManager)
 	{
-		return configManager.getConfig(W2Config.class);
+		return configManager.getConfig(
+				W2Config.class
+		);
 	}
 }
