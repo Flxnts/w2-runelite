@@ -9,6 +9,7 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Insets;
+import java.awt.Rectangle;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -32,6 +33,7 @@ import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.Scrollable;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingConstants;
@@ -82,8 +84,6 @@ public class W2Panel extends PluginPanel
     private JButton watchTab;
     private JButton tradesTab;
 
-    private JTextField bankField;
-    private JLabel bankStatus;
     private JLabel flipStatus;
     private JPanel flipRows;
 
@@ -102,6 +102,7 @@ public class W2Panel extends PluginPanel
 
     private final Map<Integer, String> itemNameCache = new HashMap<>();
     private boolean suppressSuggestions;
+    private long flipRequestGeneration;
 
     public W2Panel(
             ItemManager itemManager,
@@ -211,52 +212,12 @@ public class W2Panel extends PluginPanel
         JPanel page = createPage();
 
         addPageTitle(page, "Flips");
-        addSectionHeading(page, "TRADING BANK");
 
-        JPanel bankRow = new JPanel(new BorderLayout(6, 0));
-        bankRow.setBackground(PANEL_BG);
-        bankRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        bankRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 31));
-
-        bankField = new JTextField(formatCompact(bankService.getBank()));
-        bankField.setFont(BODY);
-        bankField.setToolTipText("Enter an amount such as 25m, 500m or 1b");
-
-        JButton apply = new JButton("Apply");
-        apply.setFont(BOLD);
-        apply.setMargin(new Insets(3, 9, 3, 9));
-        apply.setFocusable(false);
-        apply.setFocusPainted(false);
-        apply.addActionListener(event -> applyBank());
-
-        bankField.addActionListener(event -> applyBank());
-
-        bankRow.add(bankField, BorderLayout.CENTER);
-        bankRow.add(apply, BorderLayout.EAST);
-
-        page.add(bankRow);
-        page.add(Box.createVerticalStrut(5));
-
-        JPanel quick = new JPanel(new GridLayout(1, 4, 4, 0));
-        quick.setBackground(PANEL_BG);
-        quick.setAlignmentX(Component.LEFT_ALIGNMENT);
-        quick.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
-
-        addBankButton(quick, "10m", 10_000_000L);
-        addBankButton(quick, "100m", 100_000_000L);
-        addBankButton(quick, "500m", 500_000_000L);
-        addBankButton(quick, "1b", 1_000_000_000L);
-
-        page.add(quick);
-        page.add(Box.createVerticalStrut(5));
-
-        bankStatus = new JLabel();
-        bankStatus.setForeground(MUTED);
-        bankStatus.setFont(SMALL);
-        bankStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-        updateBankStatus();
-        page.add(bankStatus);
-
+        JLabel intro = new JLabel("Live GE opportunities ranked by profit, activity and fill risk.");
+        intro.setForeground(MUTED);
+        intro.setFont(SMALL);
+        intro.setAlignmentX(Component.LEFT_ALIGNMENT);
+        page.add(intro);
         page.add(Box.createVerticalStrut(13));
 
         JPanel marketHeader = new JPanel(new BorderLayout(8, 0));
@@ -526,19 +487,11 @@ public class W2Panel extends PluginPanel
         page.add(tradeRows);
         page.add(Box.createVerticalStrut(10));
 
-        JPanel actions =
-                new JPanel(
-                        new BorderLayout()
-                );
-
+        JPanel actions = new JPanel();
+        actions.setLayout(new BoxLayout(actions, BoxLayout.Y_AXIS));
         actions.setBackground(PANEL_BG);
         actions.setAlignmentX(Component.LEFT_ALIGNMENT);
-        actions.setMaximumSize(
-                new Dimension(
-                        Integer.MAX_VALUE,
-                        20
-                )
-        );
+        actions.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
 
         JLabel local =
                 new JLabel(
@@ -609,15 +562,11 @@ public class W2Panel extends PluginPanel
                 }
         );
 
-        actions.add(
-                local,
-                BorderLayout.WEST
-        );
-
-        actions.add(
-                clear,
-                BorderLayout.EAST
-        );
+        local.setAlignmentX(Component.LEFT_ALIGNMENT);
+        clear.setAlignmentX(Component.LEFT_ALIGNMENT);
+        actions.add(local);
+        actions.add(Box.createVerticalStrut(3));
+        actions.add(clear);
 
         page.add(createDivider());
         page.add(Box.createVerticalStrut(7));
@@ -1250,58 +1199,50 @@ public class W2Panel extends PluginPanel
 
     private JPanel createPage()
     {
-        JPanel page = new JPanel();
+        JPanel page = new ViewportWidthPanel();
         page.setLayout(new BoxLayout(page, BoxLayout.Y_AXIS));
         page.setBackground(PANEL_BG);
         page.setBorder(BorderFactory.createEmptyBorder(4, 10, 12, 10));
         return page;
     }
 
-    private void applyBank()
+    /**
+     * RuneLite's sidebar is narrow and resizable. A normal JPanel inside a
+     * JScrollPane keeps its preferred width, which can make BoxLayout content
+     * clip or appear as one oversized card. This page always follows the
+     * viewport width while remaining vertically scrollable.
+     */
+    private static final class ViewportWidthPanel extends JPanel implements Scrollable
     {
-        try
+        @Override
+        public Dimension getPreferredScrollableViewportSize()
         {
-            long bank = bankService.parseAmount(bankField.getText());
-            bankService.setBank(bank);
-            bankField.setText(formatCompact(bank));
-            updateBankStatus();
-            refreshFlips();
-        }
-        catch (IllegalArgumentException exception)
-        {
-            bankStatus.setText(exception.getMessage());
-            bankStatus.setForeground(RED);
-        }
-    }
-
-    private void addBankButton(JPanel panel, String text, long value)
-    {
-        JButton button = new JButton(text);
-        button.setFont(new Font("SansSerif", Font.BOLD, 10));
-        button.setMargin(new Insets(2, 1, 2, 1));
-        button.setFocusable(false);
-        button.setFocusPainted(false);
-
-        button.addActionListener(event ->
-        {
-            bankService.setBank(value);
-            bankField.setText(text);
-            updateBankStatus();
-            refreshFlips();
-        });
-
-        panel.add(button);
-    }
-
-    private void updateBankStatus()
-    {
-        if (bankStatus == null)
-        {
-            return;
+            return getPreferredSize();
         }
 
-        bankStatus.setForeground(MUTED);
-        bankStatus.setText("Trading bank: " + formatCompact(bankService.getBank()));
+        @Override
+        public int getScrollableUnitIncrement(Rectangle visibleRect, int orientation, int direction)
+        {
+            return 14;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(Rectangle visibleRect, int orientation, int direction)
+        {
+            return Math.max(14, visibleRect.height - 28);
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth()
+        {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight()
+        {
+            return false;
+        }
     }
 
     private void refreshFlips()
@@ -1311,6 +1252,7 @@ public class W2Panel extends PluginPanel
             return;
         }
 
+        final long requestGeneration = ++flipRequestGeneration;
         flipRows.removeAll();
         flipRows.revalidate();
         flipRows.repaint();
@@ -1319,12 +1261,20 @@ public class W2Panel extends PluginPanel
         flipStatus.setForeground(MUTED);
 
         priceService.getFlipCandidates(
-                bankService.getBank(),
-                candidates -> SwingUtilities.invokeLater(
-                        () -> showFlipCandidates(candidates)
-                ),
+                candidates -> SwingUtilities.invokeLater(() ->
+                {
+                    if (requestGeneration != flipRequestGeneration)
+                    {
+                        return;
+                    }
+                    showFlipCandidates(candidates);
+                }),
                 exception -> SwingUtilities.invokeLater(() ->
                 {
+                    if (requestGeneration != flipRequestGeneration)
+                    {
+                        return;
+                    }
                     flipStatus.setText("Could not load live flips.");
                     flipStatus.setForeground(RED);
                 })
@@ -1397,7 +1347,7 @@ public class W2Panel extends PluginPanel
         details.setLayout(new BoxLayout(details, BoxLayout.Y_AXIS));
         details.setBackground(CARD_BG);
 
-        JLabel name = new JLabel(shortenName(candidate.getName(), 25));
+        JLabel name = new JLabel(shortenName(candidate.getName(), 22));
         name.setForeground(Color.WHITE);
         name.setFont(BOLD);
         name.setToolTipText(candidate.getName());
@@ -1412,8 +1362,8 @@ public class W2Panel extends PluginPanel
 
         JLabel profit = new JLabel(
                 "+"
-                        + formatCompact(candidate.getProfit())
-                        + " ea  •  "
+                        + formatCompact(candidate.getPotentialProfit())
+                        + " plan  •  "
                         + String.format(
                         Locale.ROOT,
                         "%.2f%%",
@@ -1422,6 +1372,10 @@ public class W2Panel extends PluginPanel
         );
         profit.setForeground(GREEN);
         profit.setFont(BOLD);
+        profit.setToolTipText(
+                "+" + formatCompact(candidate.getProfit())
+                        + " each after GE tax"
+        );
 
         String activityText =
                 "Qty "
@@ -1433,8 +1387,8 @@ public class W2Panel extends PluginPanel
                         candidate.getVolume()
                 )
                         + "/5m"
-                        + "  •  "
-                        + candidate.getMarketSignal();
+                        + " • "
+                        + shortMarketSignal(candidate.getMarketSignal());
 
         /*
          * Fresh/Recent are normal and do not need to consume scarce sidebar
@@ -1442,7 +1396,7 @@ public class W2Panel extends PluginPanel
          */
         if ("Aging".equals(candidate.getFreshnessSignal()))
         {
-            activityText += "  •  Aging";
+            activityText += " • Aging";
         }
 
         JLabel activity =
@@ -1482,7 +1436,7 @@ public class W2Panel extends PluginPanel
             JLabel warning =
                     new JLabel(
                             "⚠ "
-                                    + candidate.getLiquidityWarning()
+                                    + shortWarning(candidate.getLiquidityWarning())
                     );
 
             warning.setFont(SMALL);
@@ -2340,6 +2294,52 @@ public class W2Panel extends PluginPanel
                         TAB_BG
                 )
         );
+    }
+
+    private static String shortMarketSignal(String signal)
+    {
+        if ("Low activity".equals(signal))
+        {
+            return "Low activity";
+        }
+        if ("Moderate".equals(signal))
+        {
+            return "Moderate";
+        }
+        if ("One-sided".equals(signal))
+        {
+            return "One-side";
+        }
+        return signal;
+    }
+
+    private static String shortWarning(String warning)
+    {
+        if (warning == null)
+        {
+            return "";
+        }
+        if ("Large size vs recent activity".equals(warning))
+        {
+            return "Size may fill slowly";
+        }
+        if ("This size may take time to fill".equals(warning))
+        {
+            return "May fill slowly";
+        }
+        if ("Weak exit-side activity".equals(warning))
+        {
+            return "Weak sell-side activity";
+        }
+        if ("Weak entry-side activity".equals(warning))
+        {
+            return "Weak buy-side activity";
+        }
+        if ("One side of the market is getting stale".equals(warning))
+        {
+            return "One side is getting stale";
+        }
+        return warning;
     }
 
     private String shortenName(String name, int maxLength)

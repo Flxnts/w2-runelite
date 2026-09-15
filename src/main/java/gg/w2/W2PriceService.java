@@ -31,6 +31,14 @@ public class W2PriceService
     private static final int GE_TAX_CAP =
             5_000_000;
 
+    /*
+     * Keep the most recent 5-minute market snapshot around briefly so Flips,
+     * Lookup and Watch are less likely to show different volume buckets when
+     * the Wiki API rolls into a new 5-minute interval between clicks.
+     */
+    private static final long FIVE_MINUTE_CACHE_MILLIS =
+            30_000L;
+
     private final OkHttpClient httpClient;
     private final Gson gson;
 
@@ -49,6 +57,17 @@ public class W2PriceService
             new ArrayList<>();
 
     private final List<Consumer<Exception>> mappingErrorWaiters =
+            new ArrayList<>();
+
+    private final Object fiveMinuteLock = new Object();
+    private FiveMinuteSnapshot fiveMinuteCache;
+    private long fiveMinuteCacheLoadedAt;
+    private boolean fiveMinuteLoading;
+
+    private final List<Consumer<FiveMinuteSnapshot>> fiveMinuteSuccessWaiters =
+            new ArrayList<>();
+
+    private final List<Consumer<Exception>> fiveMinuteErrorWaiters =
             new ArrayList<>();
 
     @Inject
@@ -195,6 +214,135 @@ public class W2PriceService
         }
     }
 
+    private void getFiveMinuteSnapshot(
+            Consumer<FiveMinuteSnapshot> onSuccess,
+            Consumer<Exception> onError)
+    {
+        FiveMinuteSnapshot cached = null;
+        boolean startRequest = false;
+        long now = System.currentTimeMillis();
+
+        synchronized (fiveMinuteLock)
+        {
+            if (fiveMinuteCache != null
+                    && now - fiveMinuteCacheLoadedAt
+                    <= FIVE_MINUTE_CACHE_MILLIS)
+            {
+                cached = fiveMinuteCache;
+            }
+            else
+            {
+                fiveMinuteSuccessWaiters.add(onSuccess);
+                fiveMinuteErrorWaiters.add(onError);
+
+                if (!fiveMinuteLoading)
+                {
+                    fiveMinuteLoading = true;
+                    startRequest = true;
+                }
+            }
+        }
+
+        if (cached != null)
+        {
+            onSuccess.accept(cached);
+            return;
+        }
+
+        if (!startRequest)
+        {
+            return;
+        }
+
+        getElement(
+                API + "5m",
+                element ->
+                {
+                    final FiveMinuteSnapshot snapshot;
+
+                    try
+                    {
+                        JsonObject root =
+                                element.getAsJsonObject();
+
+                        JsonObject data =
+                                root.getAsJsonObject("data");
+
+                        if (data == null)
+                        {
+                            throw new IOException(
+                                    "No 5-minute market data"
+                            );
+                        }
+
+                        snapshot =
+                                new FiveMinuteSnapshot(
+                                        data,
+                                        getNullableLong(
+                                                root,
+                                                "timestamp"
+                                        )
+                                );
+                    }
+                    catch (Exception exception)
+                    {
+                        failFiveMinuteLoad(exception);
+                        return;
+                    }
+
+                    final List<Consumer<FiveMinuteSnapshot>> successWaiters;
+
+                    synchronized (fiveMinuteLock)
+                    {
+                        fiveMinuteCache = snapshot;
+                        fiveMinuteCacheLoadedAt =
+                                System.currentTimeMillis();
+                        fiveMinuteLoading = false;
+
+                        successWaiters =
+                                new ArrayList<>(
+                                        fiveMinuteSuccessWaiters
+                                );
+
+                        fiveMinuteSuccessWaiters.clear();
+                        fiveMinuteErrorWaiters.clear();
+                    }
+
+                    for (Consumer<FiveMinuteSnapshot> waiter
+                            : successWaiters)
+                    {
+                        waiter.accept(snapshot);
+                    }
+                },
+                this::failFiveMinuteLoad
+        );
+    }
+
+    private void failFiveMinuteLoad(
+            Exception exception)
+    {
+        final List<Consumer<Exception>> errorWaiters;
+
+        synchronized (fiveMinuteLock)
+        {
+            fiveMinuteLoading = false;
+
+            errorWaiters =
+                    new ArrayList<>(
+                            fiveMinuteErrorWaiters
+                    );
+
+            fiveMinuteSuccessWaiters.clear();
+            fiveMinuteErrorWaiters.clear();
+        }
+
+        for (Consumer<Exception> waiter
+                : errorWaiters)
+        {
+            waiter.accept(exception);
+        }
+    }
+
     public void getItemData(
             int itemId,
             Consumer<W2ItemData> onSuccess,
@@ -289,42 +437,32 @@ public class W2PriceService
             Long lowTime,
             Consumer<W2ItemData> onSuccess)
     {
-        getElement(
-                API + "5m?id=" + itemId,
-                element ->
+        getFiveMinuteSnapshot(
+                snapshot ->
                 {
                     Integer highVolume = null;
                     Integer lowVolume = null;
 
                     try
                     {
-                        JsonObject root =
-                                element.getAsJsonObject();
+                        JsonObject item =
+                                snapshot.data.getAsJsonObject(
+                                        String.valueOf(itemId)
+                                );
 
-                        JsonObject data =
-                                root.getAsJsonObject("data");
-
-                        if (data != null)
+                        if (item != null)
                         {
-                            JsonObject item =
-                                    data.getAsJsonObject(
-                                            String.valueOf(itemId)
+                            highVolume =
+                                    getNullableInt(
+                                            item,
+                                            "highPriceVolume"
                                     );
 
-                            if (item != null)
-                            {
-                                highVolume =
-                                        getNullableInt(
-                                                item,
-                                                "highPriceVolume"
-                                        );
-
-                                lowVolume =
-                                        getNullableInt(
-                                                item,
-                                                "lowPriceVolume"
-                                        );
-                            }
+                            lowVolume =
+                                    getNullableInt(
+                                            item,
+                                            "lowPriceVolume"
+                                    );
                         }
                     }
                     catch (Exception ignored)
@@ -338,7 +476,8 @@ public class W2PriceService
                                     highTime,
                                     lowTime,
                                     highVolume,
-                                    lowVolume
+                                    lowVolume,
+                                    snapshot.timestamp
                             )
                     );
                 },
@@ -350,6 +489,7 @@ public class W2PriceService
                                         highTime,
                                         lowTime,
                                         null,
+                                        null,
                                         null
                                 )
                         )
@@ -357,7 +497,6 @@ public class W2PriceService
     }
 
     public void getFlipCandidates(
-            long bank,
             Consumer<List<W2FlipCandidate>> onSuccess,
             Consumer<Exception> onError)
     {
@@ -376,25 +515,17 @@ public class W2PriceService
                                                                 "data"
                                                         );
 
-                                        getElement(
-                                                API + "5m",
-                                                fiveMinuteElement ->
+                                        getFiveMinuteSnapshot(
+                                                snapshot ->
                                                 {
                                                     try
                                                     {
-                                                        JsonObject fiveMinute =
-                                                                fiveMinuteElement
-                                                                        .getAsJsonObject()
-                                                                        .getAsJsonObject(
-                                                                                "data"
-                                                                        );
-
                                                         List<W2FlipCandidate> candidates =
                                                                 buildCandidates(
-                                                                        bank,
                                                                         mapping,
                                                                         latest,
-                                                                        fiveMinute
+                                                                        snapshot.data,
+                                                                        snapshot.timestamp
                                                                 );
 
                                                         onSuccess.accept(
@@ -473,10 +604,10 @@ public class W2PriceService
     }
 
     private List<W2FlipCandidate> buildCandidates(
-            long bank,
             Map<Integer, ItemMeta> mapping,
             JsonObject latest,
-            JsonObject fiveMinute)
+            JsonObject fiveMinute,
+            Long fiveMinuteTimestamp)
     {
         List<W2FlipCandidate> result =
                 new ArrayList<>();
@@ -531,11 +662,6 @@ public class W2PriceService
                     || high <= 0
                     || low <= 0
                     || high <= low)
-            {
-                continue;
-            }
-
-            if (bank < low)
             {
                 continue;
             }
@@ -630,62 +756,42 @@ public class W2PriceService
             }
 
             int highVolumeValue =
-                    highVolume == null
-                            ? 0
-                            : highVolume;
+                    valueOrZero(highVolume);
 
             int lowVolumeValue =
-                    lowVolume == null
-                            ? 0
-                            : lowVolume;
+                    valueOrZero(lowVolume);
 
             int volume =
-                    highVolumeValue
-                            + lowVolumeValue;
+                    combinedFiveMinuteVolume(
+                            highVolume,
+                            lowVolume
+                    );
 
             if (volume < 5)
             {
                 continue;
             }
 
-            long affordable =
-                    bank / low;
-
-            if (affordable < 1)
-            {
-                continue;
-            }
-
-            long baseQuantity =
-                    affordable;
-
-            if (meta.limit > 0)
-            {
-                baseQuantity =
-                        Math.min(
-                                baseQuantity,
-                                meta.limit
-                        );
-            }
+            /*
+             * W2 no longer asks for a cash stack. Suggested size is based on
+             * the item's GE limit and recent two-sided market activity only.
+             * This keeps the shortlist honest instead of forcing different
+             * items for arbitrary bank presets.
+             */
+            long baseQuantity = meta.limit > 0
+                    ? meta.limit
+                    : Long.MAX_VALUE;
 
             int smallerSide =
-                    Math.min(
-                            highVolumeValue,
-                            lowVolumeValue
-                    );
-
-            int largerSide =
-                    Math.max(
-                            highVolumeValue,
-                            lowVolumeValue
+                    weakerSideVolume(
+                            highVolume,
+                            lowVolume
                     );
 
             boolean oneSided =
-                    largerSide > 0
-                            && smallerSide
-                            < Math.max(
-                            1,
-                            largerSide / 5
+                    isOneSided(
+                            highVolume,
+                            lowVolume
                     );
 
             /*
@@ -714,41 +820,17 @@ public class W2PriceService
                     (long) profit
                             * quantity;
 
-            String marketSignal;
+            String marketSignal =
+                    marketSignal(
+                            highVolume,
+                            lowVolume
+                    );
 
-            if (volume < 10
-                    || highVolumeValue == 0
-                    || lowVolumeValue == 0)
-            {
-                marketSignal = "Thin";
-            }
-            else if (oneSided)
-            {
-                marketSignal = "One-sided";
-            }
-            else if (volume < 50)
-            {
-                marketSignal = "Low";
-            }
-            else
-            {
-                marketSignal = "Active";
-            }
-
-            String freshnessSignal;
-
-            if (oldestAge <= 300)
-            {
-                freshnessSignal = "Fresh";
-            }
-            else if (oldestAge <= 900)
-            {
-                freshnessSignal = "Recent";
-            }
-            else
-            {
-                freshnessSignal = "Aging";
-            }
+            String freshnessSignal =
+                    freshnessSignal(
+                            highTime,
+                            lowTime
+                    );
 
             String liquidityWarning = null;
 
@@ -797,6 +879,7 @@ public class W2PriceService
                             lowVolume,
                             highTime,
                             lowTime,
+                            fiveMinuteTimestamp,
                             quantity,
                             potential,
                             marketSignal,
@@ -806,18 +889,25 @@ public class W2PriceService
             );
         }
 
+        /*
+         * Bank-independent ranking. Prefer real post-tax opportunity backed
+         * by two-sided activity, while penalising risky/stale-looking fills.
+         */
         result.sort(
                 Comparator
-                        .comparingLong(
-                                W2FlipCandidate::getPotentialProfit
+                        .<W2FlipCandidate>comparingDouble(
+                                W2PriceService::marketOpportunityScore
                         )
                         .reversed()
                         .thenComparing(
-                                Comparator
-                                        .comparingInt(
-                                                W2FlipCandidate::getVolume
-                                        )
-                                        .reversed()
+                                Comparator.comparingLong(
+                                        W2FlipCandidate::getPotentialProfit
+                                ).reversed()
+                        )
+                        .thenComparing(
+                                Comparator.comparingInt(
+                                        W2FlipCandidate::getWeakerSideVolume
+                                ).reversed()
                         )
         );
 
@@ -832,6 +922,155 @@ public class W2PriceService
         }
 
         return result;
+    }
+
+    private static double marketOpportunityScore(
+            W2FlipCandidate candidate)
+    {
+        double profitQuality = Math.log10(
+                Math.max(1.0, candidate.getPotentialProfit()) + 1.0
+        );
+
+        double activityQuality = Math.log10(
+                Math.max(1.0, candidate.getWeakerSideVolume()) + 1.0
+        );
+
+        double roiQuality = Math.sqrt(
+                Math.min(25.0, Math.max(0.0, candidate.getRoi()))
+        );
+
+        double warningPenalty = candidate.hasLiquidityWarning()
+                ? 2.0
+                : 0.0;
+
+        return (3.0 * profitQuality)
+                + (2.0 * activityQuality)
+                + roiQuality
+                - warningPenalty;
+    }
+
+    private static int valueOrZero(
+            Integer value)
+    {
+        return value == null
+                ? 0
+                : value;
+    }
+
+    private static int combinedFiveMinuteVolume(
+            Integer highVolume,
+            Integer lowVolume)
+    {
+        return valueOrZero(highVolume)
+                + valueOrZero(lowVolume);
+    }
+
+    private static int weakerSideVolume(
+            Integer highVolume,
+            Integer lowVolume)
+    {
+        return Math.min(
+                valueOrZero(highVolume),
+                valueOrZero(lowVolume)
+        );
+    }
+
+    private static boolean isOneSided(
+            Integer highVolume,
+            Integer lowVolume)
+    {
+        int smallerSide =
+                weakerSideVolume(
+                        highVolume,
+                        lowVolume
+                );
+
+        int largerSide =
+                Math.max(
+                        valueOrZero(highVolume),
+                        valueOrZero(lowVolume)
+                );
+
+        return largerSide > 0
+                && smallerSide
+                < Math.max(
+                1,
+                largerSide / 5
+        );
+    }
+
+    private static String marketSignal(
+            Integer highVolume,
+            Integer lowVolume)
+    {
+        int high =
+                valueOrZero(highVolume);
+
+        int low =
+                valueOrZero(lowVolume);
+
+        int total =
+                high + low;
+
+        if (total < 10
+                || high == 0
+                || low == 0)
+        {
+            return "Low activity";
+        }
+
+        if (isOneSided(
+                highVolume,
+                lowVolume))
+        {
+            return "One-sided";
+        }
+
+        if (total < 50)
+        {
+            return "Moderate";
+        }
+
+        return "Active";
+    }
+
+    private static String freshnessSignal(
+            Long highTime,
+            Long lowTime)
+    {
+        if (highTime == null
+                || lowTime == null)
+        {
+            return null;
+        }
+
+        long now =
+                Instant.now()
+                        .getEpochSecond();
+
+        long oldestAge =
+                Math.max(
+                        Math.max(
+                                0,
+                                now - highTime
+                        ),
+                        Math.max(
+                                0,
+                                now - lowTime
+                        )
+                );
+
+        if (oldestAge <= 300)
+        {
+            return "Fresh";
+        }
+
+        if (oldestAge <= 900)
+        {
+            return "Recent";
+        }
+
+        return "Aging";
     }
 
     private int calculateTax(
@@ -950,6 +1189,20 @@ public class W2PriceService
         return value.getAsLong();
     }
 
+    private static class FiveMinuteSnapshot
+    {
+        private final JsonObject data;
+        private final Long timestamp;
+
+        private FiveMinuteSnapshot(
+                JsonObject data,
+                Long timestamp)
+        {
+            this.data = data;
+            this.timestamp = timestamp;
+        }
+    }
+
     private static class ItemMeta
     {
         private final int id;
@@ -977,6 +1230,7 @@ public class W2PriceService
 
         private final Integer highVolume;
         private final Integer lowVolume;
+        private final Long fiveMinuteTimestamp;
 
         public W2ItemData(
                 int high,
@@ -984,7 +1238,8 @@ public class W2PriceService
                 Long highTime,
                 Long lowTime,
                 Integer highVolume,
-                Integer lowVolume)
+                Integer lowVolume,
+                Long fiveMinuteTimestamp)
         {
             this.high = high;
             this.low = low;
@@ -992,6 +1247,8 @@ public class W2PriceService
             this.lowTime = lowTime;
             this.highVolume = highVolume;
             this.lowVolume = lowVolume;
+            this.fiveMinuteTimestamp =
+                    fiveMinuteTimestamp;
         }
 
         public int getHigh()
@@ -1032,14 +1289,53 @@ public class W2PriceService
                 return null;
             }
 
-            return (highVolume == null
-                    ? 0
-                    : highVolume)
-                    +
-                    (lowVolume == null
-                            ? 0
-                            : lowVolume);
+            return combinedFiveMinuteVolume(
+                    highVolume,
+                    lowVolume
+            );
         }
+
+        public Integer getWeakerSideVolume()
+        {
+            if (highVolume == null
+                    && lowVolume == null)
+            {
+                return null;
+            }
+
+            return weakerSideVolume(
+                    highVolume,
+                    lowVolume
+            );
+        }
+
+        public String getMarketSignal()
+        {
+            if (highVolume == null
+                    && lowVolume == null)
+            {
+                return null;
+            }
+
+            return marketSignal(
+                    highVolume,
+                    lowVolume
+            );
+        }
+
+        public String getFreshnessSignal()
+        {
+            return freshnessSignal(
+                    highTime,
+                    lowTime
+            );
+        }
+
+        public Long getFiveMinuteTimestamp()
+        {
+            return fiveMinuteTimestamp;
+        }
+
     }
 
     public static class W2FlipCandidate
@@ -1061,6 +1357,7 @@ public class W2PriceService
 
         private final Long highTime;
         private final Long lowTime;
+        private final Long fiveMinuteTimestamp;
 
         private final long suggestedQuantity;
         private final long potentialProfit;
@@ -1082,6 +1379,7 @@ public class W2PriceService
                 Integer lowVolume,
                 Long highTime,
                 Long lowTime,
+                Long fiveMinuteTimestamp,
                 long suggestedQuantity,
                 long potentialProfit,
                 String marketSignal,
@@ -1100,6 +1398,8 @@ public class W2PriceService
             this.lowVolume = lowVolume;
             this.highTime = highTime;
             this.lowTime = lowTime;
+            this.fiveMinuteTimestamp =
+                    fiveMinuteTimestamp;
             this.suggestedQuantity =
                     suggestedQuantity;
             this.potentialProfit =
@@ -1152,6 +1452,14 @@ public class W2PriceService
             return volume;
         }
 
+        public int getWeakerSideVolume()
+        {
+            return weakerSideVolume(
+                    highVolume,
+                    lowVolume
+            );
+        }
+
         public Integer getHighVolume()
         {
             return highVolume;
@@ -1170,6 +1478,11 @@ public class W2PriceService
         public Long getLowTime()
         {
             return lowTime;
+        }
+
+        public Long getFiveMinuteTimestamp()
+        {
+            return fiveMinuteTimestamp;
         }
 
         public long getSuggestedQuantity()
@@ -1204,3 +1517,4 @@ public class W2PriceService
         }
     }
 }
+
